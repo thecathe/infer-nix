@@ -1,15 +1,13 @@
-{ stdenv }:
-let
-  version = "1.2.0";
-in
-stdenv.mkDerivation rec {
-  pname = "infer-nix";
-  version = version;
-  system = "x86_64-linux";
-  src = ./.;
-  nativeBuildInputs = [];
-  buildInputs = [];
-  buildPhase = ''
-    make install
-  '';
-}
+# # let
+# #   nixpkgs = fetchTarball "https://github.com/NixOS/nixpkgs/tarball/nixos-25.11";
+# #   pkgs = import nixpkgs {
+# #     config = { };
+# #     overlays = [ ];
+# #   }; 
+# #   in
+# { pkgs }:
+# (pkgs.buildFHSEnv {
+#   name = "fhs env";
+#   targetPkgs = pkgs: [ pkgs.bash ];
+#   runScript = "bash";
+# }).env
