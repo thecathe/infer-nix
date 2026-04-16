@@ -1,42 +1,60 @@
-{ pkgs ? import <nixpkgs> {} }:
-
-(pkgs.buildFHSEnv
 {
-  name = "infer-nix";
+  pkgs ? import <nixpkgs> { },
+}:
 
-  targetPkgs = pkgs: with pkgs; 
-  with pkgs.buildPackages;
-  [ 
-    makeWrapper
-    pkg-config
-  bash 
+let
+  fhs = pkgs.buildFHSEnv {
+    name = "infer-nix";
 
+    targetPkgs =
+      pkgs:
+      with pkgs;
+      with pkgs.buildPackages;
+      [
+        # makeWrapper
+        # pkg-config
+        bash
+        automake
+        cmake
+        zlib
+        autoconf
+        opam
+        stdenv.cc
+        # jdk8
+        clang
+        python3
+        erlang
+        go
+        # rustc
+        # swift
+      ];
 
-   automake
-    cmake
-    zlib
-    autoconf
-    stdenv.cc
-    # jdk8
-    clang
-    python3
-    erlang
-    opam
-    go
-    # rustc
-    # swift
+    runScript = ''
+      bash -c "
+        eval $(opam env)
 
+        echo 'Running devsetup...'
+        make devsetup
 
-    # cowsay
-    # lolcat
-  ];
-  runScript = "bash";
+        echo 'Checking for local installation .local'
+        if [ ! -d .local ]; then
+          echo 'Dir .local not found, installing...'
+          make install prefix=$PWD/.local
+        else
+          echo 'Already installed.'
+        fi
 
-  # shellHook = ''
-  #   echo "Building \"./build-infer.sh -y erlang" | lolcat
-  #   bash ./build-infer.sh -y erlang
-  #   echo "Running \"make devsetup\"" | lolcat
-  #   make devsetup
-  #   echo "Welcome." | cowsay | lolcat
-  # '';
-}).env
+        ## export path
+        export PATH='$PWD/.local/bin:$PATH'
+        
+        exec bash
+      "
+    '';
+  };
+in
+pkgs.mkShell {
+  packages = [ fhs ];
+  shellHook = ''
+    exec infer-nix
+  '';
+}
