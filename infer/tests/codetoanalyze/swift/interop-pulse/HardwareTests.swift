@@ -12,14 +12,51 @@ func testObjCClassMethod_bad() {
 }
 
 // --- 2. INSTANCE METHOD (-) BRIDGE ---
-func testObjCInstanceMethod_good_fp() {
+func testObjCInstanceMethod_good() {
     let device = LegacyHardware()
     let status = device.getBatteryStatus()
-    assert(status == 88)
+    assert(status == 75)
 }
 
 func testObjCInstanceMethod_bad() {
     let device = LegacyHardware()
     let status = device.getBatteryStatus()
-    assert(status == 0)
+    assert(status != 75)
+}
+
+// --- 3. CONDITIONAL DYNAMIC DISPATCH ---
+
+func testConditionalErasure(condition: Bool) -> Int32 {
+    let device: AnyObject
+
+    if condition {
+        device = LegacyHardware()
+    } else {
+        device = SomeOtherHardware()
+    }
+
+    // The Frontend sees a call on 'AnyObject'.
+    // It does not know which class to use for the QualifiedProcName.
+    let status = device.getBatteryStatus()
+    return status
+}
+
+func testConditionalDispatch_True_Path_Good_FP() {
+    let status = testConditionalErasure(condition: true)
+    assert(status == 75)
+}
+
+func testConditionalDispatch_True_Path_Bad() {
+    let status = testConditionalErasure(condition: true)
+    assert(status != 75)
+}
+
+func testConditionalDispatch_False_Path_Good_FP() {
+    let status = testConditionalErasure(condition: false)
+     assert(status == 50)
+}
+
+func testConditionalDispatch_False_Path_Bad() {
+    let status = testConditionalErasure(condition: false)
+     assert(status != 50)
 }

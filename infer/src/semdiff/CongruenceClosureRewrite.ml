@@ -160,18 +160,20 @@ module Pattern = struct
         if not (CC.is_equiv cc head (header :> CC.Atom.t)) then acc
         else
           (* For each child, either match it against the pattern (and remove it)
-             or keep it. At the end, rebuild with kept children only. *)
-          let rec process acc subst kept remaining =
+             or keep it. At the end, rebuild with kept children only.
+             Each child is matched independently (fresh substitution) so that
+             multiple matching children are all removed in one pass. *)
+          let rec process acc kept remaining =
             match remaining with
             | [] ->
                 CC.Atom.Set.add (CC.mk_term cc header (List.rev kept)) acc
             | child :: rest ->
                 let child' = CC.representative cc child in
-                let substs = e_match_at_loop ~debug:false cc subst arg child' in
-                if SubstSet.is_empty substs then process acc subst (child' :: kept) rest
-                else SubstSet.fold (fun subst acc -> process acc subst kept rest) substs acc
+                let substs = e_match_at_loop ~debug:false cc Var.Map.empty arg child' in
+                if SubstSet.is_empty substs then process acc (child' :: kept) rest
+                else process acc kept rest
           in
-          process acc Var.Map.empty [] children )
+          process acc [] children )
     |> CC.Atom.Set.elements
 
 
@@ -203,16 +205,18 @@ end
 
 module Rule = struct
   type t =
-    | Regular of {lhs: Pattern.t; rhs: Pattern.t; exclude: CC.Atom.t list}
-    | Ellipsis of Pattern.ellipsis
+    | Regular of {lhs: Pattern.t; rhs: Pattern.t; exclude: CC.Atom.t list; mutable fire_count: int}
+    | Ellipsis of {ellipsis: Pattern.ellipsis; mutable fire_count: int}
 
   let pp fmt = function
     | Regular {lhs; rhs} ->
         F.fprintf fmt "@[<hv>%a@ ==>@ %a@]" Pattern.pp lhs Pattern.pp rhs
-    | Ellipsis ellipsis ->
+    | Ellipsis {ellipsis} ->
         F.fprintf fmt "@[<hv>%a ==>@ (%a ...)@]" Pattern.pp_ellipsis ellipsis CC.pp_header
           ellipsis.header
 
+
+  let fire_count = function Regular {fire_count} | Ellipsis {fire_count} -> fire_count
 
   let apply_at ?(debug = false) cc rule atom =
     match rule with
@@ -224,28 +228,73 @@ module Rule = struct
             if debug then F.printf "rhs_term = %a@." (CC.pp_nested_term cc) rhs_term ;
             CC.merge cc atom (CC.Atom rhs_term) ) ;
         List.length substs
-    | Ellipsis ellipsis ->
+    | Ellipsis {ellipsis} ->
         Pattern.e_match_ellipsis_at cc ellipsis atom
         |> List.iter ~f:(fun new_atom -> CC.merge cc atom (CC.Atom new_atom)) ;
         0
 
 
-  let rewrite_app_right_neutral ~debug cc =
-    if CC.app_right_neutral_exists cc then
-      CC.iter_app_roots cc ~f:(fun atom ->
-          let atom' = CC.representative cc atom in
-          let app_equations = CC.equiv_terms cc atom' in
-          List.iter app_equations ~f:(fun {CC.enode= {head; children}} ->
-              let filtered =
-                List.filter children ~f:(fun child -> not (CC.is_app_right_neutral cc child))
-              in
-              if
-                List.length filtered < List.length children
-                && not (CC.is_equiv cc atom' (head :> CC.Atom.t))
-              then (
-                if debug then
-                  F.printf "rewrite app_right_neutral on atom %a@." (CC.pp_nested_term cc) atom ;
-                CC.merge cc atom' (CC.Enode {head; children= filtered}) ) ) )
+  (* Diff congruence: directly decompose @DIFF(f(a0,...,an), f(b0,...,bn))
+     into f(@DIFF(a0,b0), ..., @DIFF(an,bn)) in the e-graph.
+     Also resolves @DIFF(x, x) to [resolved].
+     When an equivalence class contains multiple enodes with the same header
+     (e.g. a list before and after ellipsis reduction), we only use the
+     smallest (fewest children) to avoid cross-pairing intermediates. *)
+
+  (** For a list of app_equations, keep only the one with fewest children per header. *)
+  let smallest_per_header cc eqs =
+    List.fold eqs ~init:[] ~f:(fun acc {CC.enode= {head; children} as enode} ->
+        let head' = CC.representative cc head in
+        match List.Assoc.find acc ~equal:phys_equal head' with
+        | None ->
+            (head', enode) :: acc
+        | Some {CC.children= prev_children} ->
+            if List.length children < List.length prev_children then
+              List.Assoc.add acc ~equal:phys_equal head' enode
+            else acc )
+    |> List.map ~f:snd
+
+
+  let rewrite_diff_congruence ~debug cc =
+    match CC.get_diff cc with
+    | None ->
+        ()
+    | Some (diff_header, resolved) ->
+        let diff_header' = CC.representative_of_header cc diff_header in
+        CC.iter_term_roots cc diff_header ~f:(fun diff_atom ->
+            let diff_atom' = CC.representative cc diff_atom in
+            if CC.is_equiv cc diff_atom' resolved then ()
+            else
+              match CC.get_enode cc diff_atom with
+              | Some {children= [left; right]} ->
+                  let left' = CC.representative cc left in
+                  let right' = CC.representative cc right in
+                  if phys_equal left' right' then (
+                    if debug then F.printf "diff identity: %a@." (CC.pp_nested_term cc) diff_atom ;
+                    CC.merge cc diff_atom' (CC.Atom resolved) )
+                  else
+                    let left_enodes = CC.equiv_terms cc left' |> smallest_per_header cc in
+                    let right_enodes = CC.equiv_terms cc right' |> smallest_per_header cc in
+                    List.iter left_enodes ~f:(fun {CC.head= lh; children= lc} ->
+                        List.iter right_enodes ~f:(fun {CC.head= rh; children= rc} ->
+                            let lh' = CC.representative cc lh in
+                            let rh' = CC.representative cc rh in
+                            if
+                              phys_equal lh' rh'
+                              && (not (phys_equal lh' diff_header'))
+                              && Int.equal (List.length lc) (List.length rc)
+                            then (
+                              let diff_children =
+                                List.map2_exn lc rc ~f:(fun l r ->
+                                    CC.mk_term cc diff_header [l; r] )
+                              in
+                              let rhs = CC.mk_term cc (CC.unsafe_header_of_atom lh) diff_children in
+                              if debug then
+                                F.printf "diff congruence: @[%a@ ==> %a@]@." (CC.pp_nested_term cc)
+                                  diff_atom (CC.pp_nested_term cc) rhs ;
+                              CC.merge cc diff_atom' (CC.Atom rhs) ) ) )
+              | _ ->
+                  () )
 
 
   let rewrite_once ?(debug = false) cc rules =
@@ -253,25 +302,27 @@ module Rule = struct
     Pattern.visit_count := 0 ;
     List.iter rules ~f:(fun rule ->
         match rule with
-        | Regular {lhs; rhs; exclude} ->
+        | Regular ({lhs; rhs; exclude} as r) ->
             Pattern.e_match cc lhs exclude ~f:(fun atom subst ->
                 let rhs_term = Pattern.to_term cc subst rhs in
                 if not (CC.is_equiv cc atom rhs_term) then (
+                  r.fire_count <- r.fire_count + 1 ;
                   if debug then
                     F.printf "rewriting @[<hv>atom %a@ with rule %a@ and subst %a@]@."
                       (CC.pp_nested_term ~depth:5 cc) atom pp rule (pp_subst cc) subst ;
                   CC.merge cc atom (CC.Atom rhs_term) ) )
-        | Ellipsis ellipsis ->
+        | Ellipsis ({ellipsis} as r) ->
             CC.iter_term_roots cc ellipsis.header ~f:(fun atom ->
-                Pattern.e_match_ellipsis_at cc ellipsis atom
-                |> List.iter ~f:(fun new_atom -> CC.merge cc atom (CC.Atom new_atom)) ) ) ;
-    rewrite_app_right_neutral ~debug cc ;
+                let matches = Pattern.e_match_ellipsis_at cc ellipsis atom in
+                if not (List.is_empty matches) then r.fire_count <- r.fire_count + 1 ;
+                List.iter matches ~f:(fun new_atom -> CC.merge cc atom (CC.Atom new_atom)) ) ) ;
+    rewrite_diff_congruence ~debug cc ;
     CC.get_update_count cc
 
 
   exception FuelExhausted of {round_count: int}
 
-  let full_rewrite ?(debug = false) ?(fuel = 1 lsl 12) cc rules =
+  let full_rewrite ?(debug = false) ?(fuel = 1 lsl 16) cc rules =
     let rec loop fuel round_count =
       if fuel <= 0 then raise (FuelExhausted {round_count})
       else (
@@ -526,9 +577,10 @@ module Parser = struct
   let raw_to_rule cc raw : Rule.t =
     match raw with
     | Regular {lhs; rhs} ->
-        Regular {lhs= raw_to_pattern cc lhs; rhs= raw_to_pattern cc rhs; exclude= []}
+        Regular {lhs= raw_to_pattern cc lhs; rhs= raw_to_pattern cc rhs; exclude= []; fire_count= 0}
     | Ellipsis {header; arg} ->
-        Ellipsis {header= CC.mk_header cc header; arg= raw_to_pattern cc arg}
+        Ellipsis
+          {ellipsis= {header= CC.mk_header cc header; arg= raw_to_pattern cc arg}; fire_count= 0}
 
 
   let parse_pattern cc input : (Pattern.t, error) Stdlib.result =

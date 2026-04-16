@@ -184,6 +184,10 @@ val capture_textual : string list
 
 val capture_rust_ullbc : string list
 
+val capture_tree_sitter : string list
+
+val tree_sitter_preprocessor : string option
+
 val censor_report : ((bool * Str.regexp) * (bool * Str.regexp) * string) list
 
 val cfg_json : string option
@@ -827,6 +831,8 @@ val semdiff_configuration : string list
 val semdiff_test_actions : [`Currify] list
 
 val semdiff_test_files_index : string option
+
+val semdiff_from_json : string option
 
 val shrink_analysis_db : bool
 

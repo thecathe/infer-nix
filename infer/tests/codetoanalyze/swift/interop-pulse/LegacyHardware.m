@@ -10,7 +10,13 @@
 + (int)getHardwareRevision {
   return 101;
 }
-- (int)currentBatteryLevel {
+- (int)getBatteryStatus {
   return 75;
+}
+@end
+
+@implementation SomeOtherHardware
+- (int)getBatteryStatus {
+  return 50;
 }
 @end
